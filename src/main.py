@@ -158,11 +158,6 @@ if "chat_history" not in st.session_state:
 st.title("📄 Chai Docs Chatbot")
 st.markdown("Search what you want to know about chai docs using the power of Pinecone and LangChain!")
 
-for message in st.session_state.chat_history:
-    if isinstance(message, HumanMessage):
-        st.markdown(f"""<div class='human-message'>🧑‍💻 **You:** <br>{message.content}</div>""", unsafe_allow_html=True)
-    else:
-        st.markdown(f"""<div class='ai-message'>🤖 **AI:** <br>{message.content}</div>""", unsafe_allow_html=True)
 
 # Get user input from the text input box
 user_query = st.text_input("🔍 Enter your question:", placeholder="e.g., What is Django?")
@@ -177,7 +172,7 @@ if user_query:
 
     # Add AI's response to chat history
     st.session_state.chat_history.append(AIMessage(content=response_text))
-    st.experimental_rerun()  # Auto-refresh to show new message
+    
 
 # --- Display Chat History ---
 
