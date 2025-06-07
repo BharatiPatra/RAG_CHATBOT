@@ -1,152 +1,189 @@
-
-# import asyncio
-# from crawl4ai import *
-
-# async def main():
-#     async with AsyncWebCrawler() as crawler:
-#         result = await crawler.arun(
-#             url="https://chaidocs.vercel.app/youtube/getting-started/",
-#         )
-#         print(result.markdown)
-
-# if __name__ == "__main__":
-#     asyncio.run(main())
-# import requests
-# from bs4 import BeautifulSoup
-# from urllib.parse import urljoin
-
-# # URL to fetch
-# url = "https://chaidocs.vercel.app/youtube/getting-started/"
-
-# # Send a GET request to the URL
-# response = requests.get(url)
-# response.raise_for_status()  # Raise an error for bad status codes
-
-# # Parse the HTML content
-# soup = BeautifulSoup(response.text, 'html.parser')
-
-# # Find all anchor tags with href attributes
-# links = soup.find_all('a', href=True)
-
-# # Extract and print the absolute URLs
-# for link in links:
-#     absolute_url = urljoin(url, link['href'])
-#     print(absolute_url)
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-from langchain_openai import OpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.docstore.document import Document
-import os
+from pinecone import Pinecone
+import streamlit as st
+from langchain_core.messages import AIMessage, HumanMessage
 from dotenv import load_dotenv
-from pinecone import Pinecone, ServerlessSpec
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_pinecone import PineconeVectorStore
-# Step 1: Load env variables
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+import os
+import time
+
+
+st.set_page_config(page_title="🧠 Pinecone RAG UI", layout="wide")
+st.markdown("""
+    <style>
+    .chatbox {
+        background-color: #f0f2f6;
+        border-radius: 12px;
+        padding: 15px;
+        margin-bottom: 10px;
+    }
+    .chat-input {
+        position: fixed;
+        bottom: 2rem;
+        width: 100%;
+        max-width: 720px;
+    }
+    .ai-message {
+        background-color: #ebf3ff;
+        border-left: 4px solid #2a6edc;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+    }
+    .human-message {
+        background-color: #dcfce7;
+        border-left: 4px solid #16a34a;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+# Load environment variables (like your API keys)
 load_dotenv()
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENV = os.getenv("PINECONE_ENVIRONMENT")
-INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
 
-# Initialize Pinecone
-print("Initializing Pinecone client...")
-pc = Pinecone(api_key=PINECONE_API_KEY)
-print("Pinecone client initialized successfully.")
+pc = Pinecone(api_key=os.getenv(PINECONE_INDEX_NAME))
 
 
-# Step 3: Create index if not exists
-embedding_model = OpenAIEmbeddings(model="text-embedding-3-large")
-EMBEDDING_DIM = 3072  # for text-embedding-3-large
+# --- App Configuration ---
 
-if INDEX_NAME not in pc.list_indexes():
-    pc.create_index(
-        name=INDEX_NAME,
-        dimension=EMBEDDING_DIM,
-        metric="cosine",
-        spec=ServerlessSpec(
-            cloud='aws', # Specify your desired cloud provider
-            region=PINECONE_ENV  # Specify the region
-        )
-    )
 
-# Step 4: Connect to Pinecone index
-index = pc.Index(INDEX_NAME)
+# --- Model and Vector Store Initialization ---
 
-# Base URL to crawl
-base_url = "https://chaidocs.vercel.app/youtube/getting-started/"
+# Initialize the LLM for generating responses
+llm = ChatOpenAI(model_name="gpt-3.5-turbo") # Or use "gpt-4" if you have access
 
-# Step 1: Get all unique internal links
-response = requests.get(base_url)
-response.raise_for_status()
-soup = BeautifulSoup(response.text, 'html.parser')
-anchor_tags = soup.find_all('a', href=True)
-unique_links = list(set([urljoin(base_url, tag['href']) for tag in anchor_tags]))
-print(f"Found {len(unique_links)} unique links.")
-
-# Step 2: Crawl each page and extract text and code
-docs = []
-for link in unique_links:
-    try:
-        print(f"\nProcessing: {link}")
-        page_response = requests.get(link)
-        page_response.raise_for_status()
-        page_soup = BeautifulSoup(page_response.text, 'html.parser')
-
-        # Extract text content
-        content_parts = []
-
-        # Extract title
-        title = page_soup.title.string if page_soup.title else "No Title"
-        content_parts.append(f"# {title}")
-
-        # Paragraphs
-        paragraphs = page_soup.find_all('p')
-        for para in paragraphs:
-            content_parts.append(para.get_text(strip=True))
-
-        # Code snippets in <pre><code> or <div> blocks with classes like "code" or "highlight"
-        code_blocks = page_soup.find_all(['h1', 'code', 'div'], class_=['code', 'highlight'])
-        for code in code_blocks:
-            content_parts.append("```python\n" + code.get_text(strip=True) + "\n```")
-
-        # Join and create Document
-        page_text = "\n\n".join(content_parts)
-        docs.append(Document(page_content=page_text, metadata={"source": link}))
-      # Print first 200 characters of the content
-
-    except requests.exceptions.RequestException as e:
-        print(f"Failed to process {link}: {e}")
-
-# Step 4: Split the content into smaller chunks
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
-    chunk_overlap=400,
-    length_function=len
-)
-split_docs = text_splitter.split_documents(docs)
-
-# Step 5: Store embeddings using LangChain’s Pinecone wrapper in batches
-
-# First, initialize the vector store without any documents
-vectorstore = PineconeVectorStore(
-    index_name=INDEX_NAME,
-    embedding=embedding_model
+# Initialize the embeddings model
+embedding_model = OpenAIEmbeddings(
+    model="text-embedding-3-large"
 )
 
-# Define the size of each batch
-batch_size = 100 
+# Initialize the Pinecone vector store
+# This assumes you have already loaded your data into the "your_index" Pinecone index
+try:
+    vector_db = PineconeVectorStore(index=pc.Index(PINECONE_INDEX_NAME), embedding=embedding_model)
 
-# Loop through the split_docs in batches
-print(f"Adding {len(split_docs)} documents to Pinecone in batches of {batch_size}...")
-for i in range(0, len(split_docs), batch_size):
-    # Find the end of the batch
-    i_end = min(i + batch_size, len(split_docs))
-    # Get the batch of documents
-    batch = split_docs[i:i_end]
-    # Add the batch to Pinecone
-    vectorstore.add_documents(batch)
-    print(f"Added batch {i//batch_size + 1}/{(len(split_docs) + batch_size - 1)//batch_size}")
+    # vector_db = PineconeVectorStore(index_name=PINECONE_INDEX_NAME , embedding=embedding_model)
+    st.info("✅ Connected to Pinecone index.")
+except Exception as e:
+    st.error(f"Failed to connect to Pinecone: {e}")
+    st.stop() # Stop the app if connection fails
 
 
-print("✅ Successfully stored embeddings in Pinecone!")
+# --- RAG Chain Definition ---
+
+# Define the prompt template for the LLM
+# prompt_template = """
+# You are a helpful assistant you trained on chai docs web application which is made by hitesh choudhary. 
+# Answer  the question based only on the following context:show all the header and paragraph beautiflly for user and if any  code is present in the context like .cpp or .py then beautifully format it, then return the code as it is without any explanation.
+# {context}
+
+# Question: {question}
+# """
+prompt_template = """
+You are a smart and helpful assistant trained specifically on the Chai Docs web application made by Hitesh Choudhary. 
+Based on the context provided below, answer the user's question in a **detailed, step-by-step, and beginner-friendly** manner.
+
+🟡 **Very Important Instructions**:
+- Only use the information present in the `context` below. Do NOT make up any information.
+- If the answer involves code (like Python or Django), include the full code blocks inside triple backticks ``` and specify the language (e.g., ```python).
+- If the context contains multiple relevant sections, summarize and merge them meaningfully.
+- Use Markdown formatting for:
+  - Headers (`##` or `###`)
+  - Bullet points
+  - Code blocks
+  - Line breaks between paragraphs
+- Do NOT explain anything that is not found in the context.
+
+🧾 **Context**:
+{context}
+
+❓ **User Question**:
+{question}
+
+✍️ **Your Answer**:
+"""
+
+
+prompt = ChatPromptTemplate.from_template(prompt_template)
+
+# Define the output parser
+output_parser = StrOutputParser()
+# Create a retriever from the vector database
+retriever = vector_db.as_retriever(search_kwargs={"k": 10
+                                                  
+                                                  }) 
+print("Retriever initialized successfully.")
+print("retriever:", retriever)
+# Define the RAG chain using LangChain Expression Language (LCEL)
+# rag_chain = (
+#     {"context": retriever, "question": RunnablePassthrough()}
+#     | prompt
+#     | llm
+#     | output_parser
+# )
+from langchain_core.runnables import RunnableLambda
+
+def retrieve_with_print(query):
+    docs = retriever.invoke(query)
+    print("Retrieved Docs:", [doc.page_content for doc in docs])  # Print in terminal
+    return docs
+
+rag_chain = (
+    {
+        "context": RunnableLambda(retrieve_with_print),
+        "question": RunnablePassthrough()
+    }
+    | prompt
+    | llm
+    | output_parser
+)
+
+
+
+# --- Chat History Management ---
+
+# Initialize chat history in session state if it doesn't exist
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        AIMessage(content="Hello! I can help you with questions about the chai docs. What would you like to know?")
+    ]
+
+# --- User Interaction ---
+st.title("📄 Chai Docs Chatbot")
+st.markdown("Search what you want to know about chai docs using the power of Pinecone and LangChain!")
+
+for message in st.session_state.chat_history:
+    if isinstance(message, HumanMessage):
+        st.markdown(f"""<div class='human-message'>🧑‍💻 **You:** <br>{message.content}</div>""", unsafe_allow_html=True)
+    else:
+        st.markdown(f"""<div class='ai-message'>🤖 **AI:** <br>{message.content}</div>""", unsafe_allow_html=True)
+
+# Get user input from the text input box
+user_query = st.text_input("🔍 Enter your question:", placeholder="e.g., What is Django?")
+
+if user_query:
+    # Add user's message to chat history
+    st.session_state.chat_history.append(HumanMessage(content=user_query))
+
+    # Get the AI response using the RAG chain
+    with st.spinner("Thinking..."):
+        response_text = rag_chain.invoke(user_query)
+
+    # Add AI's response to chat history
+    st.session_state.chat_history.append(AIMessage(content=response_text))
+    st.experimental_rerun()  # Auto-refresh to show new message
+
+# --- Display Chat History ---
+
+# Display the chat history
+for message in st.session_state.chat_history:
+    role = "AI" if isinstance(message, AIMessage) else "Human"
+    with st.chat_message(role):
+        st.markdown(message.content)
+        
